@@ -38,6 +38,56 @@ const readGoogleSheet = async (sheetName) => {
     }
 };
 
+const updateGoogleSheet = async (sheetName, name, weightData) => {
+    try {
+        const keyFilePath = process.env.KEY_FILE_PATH;
+        const auth = new google.auth.GoogleAuth({
+            keyFile: keyFilePath,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+
+        const sheets = google.sheets({ version: 'v4', auth });
+
+        // Read the sheet to find the row with the matching name in column D (index 3)
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.GOOGLE_SHEET_ID,
+            range: `${sheetName}!A:Z`,
+        });
+
+        const data = response.data.values || [];
+        const rowIndex = data.findIndex(row => row[3] === name);
+
+        if (rowIndex === -1) {
+            throw new Error(`Name "${name}" not found in column D of sheet "${sheetName}"`);
+        }
+
+        // Get the existing value in column M (index 12)
+        const existingValue = data[rowIndex][12] || '';
+
+        // Append the new weight data to the existing value
+        const newValue = existingValue ? `${existingValue} | ${weightData}` : weightData;
+
+        // Update column M (index 12) of the found row
+        const updateRange = `${sheetName}!M${rowIndex + 1}`; // +1 because Google Sheets is 1-indexed
+        const updateValue = [[newValue]];
+
+        const updateResponse = await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.GOOGLE_SHEET_ID,
+            range: updateRange,
+            valueInputOption: 'USER_ENTERED',
+            resource: {
+                values: updateValue,
+            },
+        });
+
+        console.log('Update response:', updateResponse.data);
+        return updateResponse.data;
+    } catch (err) {
+        console.error('Error updating Google Sheet:', err);
+        throw err; // Re-throw the error for the API endpoint to handle
+    }
+};
+
 app.get('/api/medical-data', async (req, res) => {
     try {
         const data = await readGoogleSheet(medicalSheetName);
@@ -118,6 +168,18 @@ app.post('/api/login', async (req, res) => {
     } catch (error) {
         console.error('Error during login:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+app.post('/api/update-weight', async (req, res) => {
+    const { name, weightData } = req.body;
+
+    try {
+        await updateGoogleSheet(medicalSheetName, name, weightData);
+        res.json({ success: true, message: 'Weight updated successfully' });
+    } catch (error) {
+        console.error('Error updating weight:', error);
+        res.status(500).json({ success: false, message: 'Failed to update weight', error: error.message });
     }
 });
 
