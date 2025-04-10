@@ -407,6 +407,22 @@ app.post('/api/update-date-to-remind', async (req, res) => {
     }
 });
 
+app.post('/api/update-time-to-remind', async (req, res) => {
+    const { name, timeToRemindData } = req.body;
+    const timeToRemindColumn = 27; // Column AB
+
+    try {
+         if (!name) {
+             throw new Error("Name is required in the request body");
+         }
+        await updateGoogleSheet(medicalSheetName, name, timeToRemindData, timeToRemindColumn);
+        res.json({ success: true, message: 'Time to Remind updated successfully' });
+    } catch (error) {
+        console.error('Error updating time to remind:', error);
+        res.status(500).json({ success: false, message: 'Failed to update time to remind', error: error.message });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server listening at http://localhost:${port}`);
 });
