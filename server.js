@@ -423,6 +423,73 @@ app.post('/api/update-time-to-remind', async (req, res) => {
     }
 });
 
+app.post('/api/add-medical-data', async (req, res) => {
+    console.log('Add medical data request body:', req.body);
+    const { surname, firstname, middle, address, contactNo, birthday, gender, status, visaStatus, localeGroup } = req.body;
+
+    try {
+        const keyFilePath = process.env.KEY_FILE_PATH;
+        const auth = new google.auth.GoogleAuth({
+            keyFile: keyFilePath,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'], // Changed to write scope
+        });
+
+        const sheets = google.sheets({ version: 'v4', auth });
+        const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+        const sheetName = medicalSheetName;
+
+        // Append the new row to the sheet
+        const appendResponse = await sheets.spreadsheets.values.append({
+            spreadsheetId: spreadsheetId,
+            range: `${sheetName}!A1`, // Appends to the end of the sheet
+            valueInputOption: 'USER_ENTERED',
+            insertDataOption: 'INSERT_ROWS', // Corrected value
+            resource: {
+                values: [[surname, firstname, middle, '', localeGroup, birthday, '', gender, status, visaStatus, address, contactNo]], // Order matches your description
+            },
+        });
+
+        console.log('Append response:', appendResponse.data);
+
+        res.json({ success: true, message: 'Medical data added successfully' });
+    } catch (error) {
+        console.error('Error adding medical data:', error);
+        res.status(500).json({ success: false, message: 'Failed to add medical data', error: error.message });
+    }
+});
+
+app.post('/api/check-medical-data', async (req, res) => {
+    const { surname, firstname, middle, birthday } = req.body;
+
+    if (!surname || !firstname || !middle || !birthday) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    try {
+        const data = await readGoogleSheet(medicalSheetName);
+
+        const exists = data.some(row => {
+            // Assuming the columns are in this order: Surname, Firstname, Middle, Birthday
+            const surnameInSheet = row[0] ? row[0].toLowerCase() : '';
+            const firstnameInSheet = row[1] ? row[1].toLowerCase() : '';
+            const middleInSheet = row[2] ? row[2].toLowerCase() : '';
+            const birthdayInSheet = row[5] ? row[5] : ''; //Birthday
+
+            const surnameMatches = surnameInSheet === surname.toLowerCase();
+            const firstnameMatches = firstnameInSheet === firstname.toLowerCase();
+            const middleMatches = middleInSheet === middle.toLowerCase();
+            const birthdayMatches = birthdayInSheet === birthday;
+
+            return surnameMatches && firstnameMatches && middleMatches && birthdayMatches;
+        });
+
+        res.json({ exists: exists });
+    } catch (error) {
+        console.error('Error checking medical data:', error);
+        res.status(500).json({ error: 'Failed to check medical data' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server listening at http://localhost:${port}`);
 });
