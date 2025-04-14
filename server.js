@@ -490,6 +490,91 @@ app.post('/api/check-medical-data', async (req, res) => {
     }
 });
 
+app.get('/api/get-name-list', async (req, res) => {
+    try {
+        const data = await readGoogleSheet(medicalSheetName);
+        // Extract names from column D (index 3)
+        const nameList = data.map(row => row[3]).filter(name => name); // Filter out empty names
+        res.json(nameList);
+    } catch (error) {
+        console.error('Error fetching name list:', error);
+        res.status(500).json({ error: 'Failed to fetch name list' });
+    }
+});
+
+app.post('/api/update-medical-data', async (req, res) => {
+    const { search, surname, firstname, middle, address, contactNo, birthday, gender, status, visaStatus, localeGroup } = req.body;
+
+    if (!search) {
+        return res.status(400).json({ error: 'Search term is required to identify the record' });
+    }
+
+    try {
+        const keyFilePath = process.env.KEY_FILE_PATH;
+        const auth = new google.auth.GoogleAuth({
+            keyFile: keyFilePath,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+
+        const sheets = google.sheets({ version: 'v4', auth });
+        const sheetName = medicalSheetName;
+
+        // Read the sheet to find the row with the matching name in column D (index 3)
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.GOOGLE_SHEET_ID,
+            range: `${sheetName}!A:L`, // Read columns A to L
+        });
+
+        const values = response.data.values || [];
+        const rowIndex = values.findIndex(row => row[3] === search);
+
+        if (rowIndex === -1) {
+            return res.status(404).json({ error: `Name "${search}" not found in column D of sheet "${sheetName}"` });
+        }
+
+        // Update the row with the new data
+        const rowNumber = rowIndex + 1;
+        const updateRange = `${sheetName}!A${rowNumber}:L${rowNumber}`; // Update columns A to L
+
+        const updateValues = [[surname, firstname, middle, '', localeGroup, birthday, '', gender, status, visaStatus, address, contactNo]];
+
+        const updateResponse = await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.GOOGLE_SHEET_ID,
+            range: updateRange,
+            valueInputOption: 'USER_ENTERED',
+            resource: {
+                values: updateValues,
+            },
+        });
+
+        console.log('Update response:', updateResponse.data);
+        res.json({ success: true, message: 'Medical data updated successfully' });
+    } catch (error) {
+        console.error('Error updating medical data:', error);
+        res.status(500).json({ success: false, message: 'Failed to update medical data', error: error.message });
+    }
+});
+
+app.post('/api/search-medical-data', async (req, res) => {
+    const { search } = req.body;
+
+    if (!search) {
+        return res.status(400).json({ error: 'Search term is required' });
+    }
+
+    try {
+        const data = await readGoogleSheet(medicalSheetName);
+        const searchResult = data.filter(row => {
+            // Search in columns A, B, C, and D (Surname, Firstname, Middle, Full Name)
+            return row.slice(0, 4).some(cell => cell && cell.toLowerCase().includes(search.toLowerCase()));
+        });
+        res.json(searchResult);
+    } catch (error) {
+        console.error('Error searching medical data:', error);
+        res.status(500).json({ error: 'Failed to search medical data' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server listening at http://localhost:${port}`);
 });
