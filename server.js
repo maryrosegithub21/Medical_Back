@@ -2,6 +2,7 @@ const express = require('express');
 const { google } = require('googleapis');
 const path = require('path');
 const cors = require('cors');
+const bcrypt = require('bcrypt'); // Added bcrypt
 require('dotenv').config();
 
 const app = express();
@@ -65,7 +66,7 @@ const readGoogleSheet = async (sheetName) => {
     }
 };
 
-const updateGoogleSheet = async (sheetName, name, data, column) => {
+const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null) => {
     try {
         const keyFilePath = process.env.KEY_FILE_PATH;
         const auth = new google.auth.GoogleAuth({
@@ -99,8 +100,12 @@ const updateGoogleSheet = async (sheetName, name, data, column) => {
         // Get the existing value in the specified column
         const existingValue = values[rowIndex][column] || '';
 
-        // Append the new data to the existing value
-        const newValue = existingValue ? `${existingValue} | ${data}` : data;
+        let newValue;
+        if (dateTime) {
+            newValue = existingValue ? `${existingValue} | ${dateTime}` : dateTime;
+        } else {
+            newValue = existingValue ? `${existingValue} | ${data}` : data;
+        }
 
         // Update the specified column of the found row
         const columnLetterUpdate = columnToLetter(column + 1); // Use helper function here
@@ -188,13 +193,16 @@ app.post('/api/login', async (req, res) => {
         // Extract user data from the row
         const userData = {
             username: userRow[0],
-            password: userRow[1],
+            passwordHash: userRow[1], // Assuming the hashed password is in the second column
             church_id: userRow[2],
         };
 
         console.log('User data from Google Sheet:', userData);
 
-        if (password !== userData.password) {
+        // Compare the provided password with the stored hash
+        const passwordMatch = await bcrypt.compare(password, userData.passwordHash);
+
+        if (!passwordMatch) {
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
 
@@ -206,6 +214,26 @@ app.post('/api/login', async (req, res) => {
     } catch (error) {
         console.error('Error during login:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+// Placeholder for registration endpoint (to be implemented)
+app.post('/api/register', async (req, res) => {
+    const { churchID, username, password } = req.body;
+
+    try {
+        // 1. Hash the password
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // 2.  Store the new user data (churchID, username, hashedPassword) in the Google Sheet
+        //    (You'll need to implement the logic to write to the Google Sheet here)
+
+        // For now, just send a response indicating success
+        res.status(201).json({ message: 'User registered successfully' });
+
+    } catch (error) {
+        console.error('Error during registration:', error);
+        res.status(500).json({ message: 'Failed to register user' });
     }
 });
 
@@ -391,30 +419,41 @@ app.post('/api/update-message-text', async (req, res) => {
     }
 });
 
-app.post('/api/update-date-to-remind', async (req, res) => {
-    const { name, dateToRemindData } = req.body;
-    const dateToRemindColumn = 26; // Column AA
+app.post('/api/update-date-time-to-remind', async (req, res) => {
+      const { name, nzdtDateTime, dateTimeToRemindData } = req.body;
+      const dateToRemindColumnAA = 26; // Column AA
+      const dateToRemindColumnAB = 27; // Column AB
 
-    try {
-         if (!name) {
-             throw new Error("Name is required in the request body");
-         }
-        await updateGoogleSheet(medicalSheetName, name, dateToRemindData, dateToRemindColumn);
-        res.json({ success: true, message: 'Date to Remind updated successfully' });
-    } catch (error) {
-        console.error('Error updating date to remind:', error);
-        res.status(500).json({ success: false, message: 'Failed to update date to remind', error: error.message });
-    }
-});
+      try {
+          if (!name) {
+              return res.status(400).json({ success: false, message: "Name is required in the request body" });
+          }
+
+          // Format the delimited data
+          const delimitedAA = nzdtDateTime ? `${nzdtDateTime} | ` : '';
+          const delimitedAB = dateTimeToRemindData ? `${dateTimeToRemindData} | ` : '';
+
+          // Update column AA with NZDT time
+          await updateGoogleSheet(medicalSheetName, name, null, dateToRemindColumnAA, delimitedAA);
+
+          // Update column AB with GMT time
+          await updateGoogleSheet(medicalSheetName, name, null, dateToRemindColumnAB, delimitedAB);
+
+          res.json({ success: true, message: 'Date and Time to Remind updated successfully' });
+      } catch (error) {
+          console.error('Error updating date and time to remind:', error);
+          res.status(500).json({ success: false, message: 'Failed to update date and time to remind', error: error.message });
+      }
+  });
 
 app.post('/api/update-time-to-remind', async (req, res) => {
     const { name, timeToRemindData } = req.body;
     const timeToRemindColumn = 27; // Column AB
 
     try {
-         if (!name) {
-             throw new Error("Name is required in the request body");
-         }
+        if (!name) {
+            throw new Error("Name is required in the request body");
+        }
         await updateGoogleSheet(medicalSheetName, name, timeToRemindData, timeToRemindColumn);
         res.json({ success: true, message: 'Time to Remind updated successfully' });
     } catch (error) {
