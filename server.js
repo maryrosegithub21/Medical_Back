@@ -217,7 +217,7 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Placeholder for registration endpoint (to be implemented)
+
 app.post('/api/register', async (req, res) => {
     const { churchID, username, password } = req.body;
 
