@@ -2,17 +2,23 @@ const express = require('express');
 const { google } = require('googleapis');
 const path = require('path');
 const cors = require('cors');
-const bcrypt = require('bcrypt'); // Added bcrypt
+const bcrypt = require('bcrypt');
+const twilio = require('twilio');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-const port = 3001;
+// const port = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;
+const accountSid = process.env.sid;
+const authToken = process.env.token;
+const twilioNumber = process.env.twilioNum;
+const client = twilio(accountSid, authToken);
 
-const usersSheetName = 'Users'; // Sheet name for user data
-const medicalSheetName = 'Medical'; // Sheet name for medical data
-const bloodSheetName = 'Blood Pressure'; // Sheet name for blood pressure data
+const usersSheetName = 'Users';
+const medicalSheetName = 'Medical';
+const bloodSheetName = 'Blood Pressure';
 
 // Helper function to convert column index to letter
 function columnToLetter(column) {
@@ -25,27 +31,57 @@ function columnToLetter(column) {
     return letter;
 }
 
+// Helper to get GoogleAuth for both local and cloud environments
+// Uses keyFile only if KEY_FILE_PATH is set (local dev), otherwise uses ADC (cloud)
+// function getGoogleAuth(scopes) {
+//     if (process.env.KEY_FILE_PATH) {
+//         return new google.auth.GoogleAuth({
+//             keyFile: process.env.KEY_FILE_PATH,
+//             scopes,
+//         });
+//     }
+//     return new google.auth.GoogleAuth({
+//         scopes,
+//     });
+// }
+/**
+ * Helper to get GoogleAuth for both local and cloud environments.
+ * Uses keyFile only if KEY_FILE_PATH is set (local dev), otherwise uses ADC (cloud).
+ * On Cloud Run, KEY_FILE_PATH should NOT be set.
+ */
+function getGoogleAuth(scopes) {
+    if (process.env.KEY_FILE_PATH) {
+        // Warn if KEY_FILE_PATH is set in production/Cloud Run
+        if (process.env.K_SERVICE || process.env.K_REVISION) {
+            console.warn(
+                '[WARNING] KEY_FILE_PATH is set in a Cloud Run environment. This will cause errors. ' +
+                'Unset KEY_FILE_PATH in your Cloud Run environment variables.'
+            );
+        }
+        return new google.auth.GoogleAuth({
+            keyFile: process.env.KEY_FILE_PATH,
+            scopes,
+        });
+    }
+    // This is the correct path for Cloud Run (uses ADC)
+    return new google.auth.GoogleAuth({
+        scopes,
+    });
+}
 const readGoogleSheet = async (sheetName) => {
     console.log('readGoogleSheet is running for sheet:', sheetName);
     try {
-        const keyFilePath = process.env.KEY_FILE_PATH;
-        const auth = new google.auth.GoogleAuth({
-            keyFile: keyFilePath,
-            scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-        });
-
+        const auth = getGoogleAuth(['https://www.googleapis.com/auth/spreadsheets.readonly']);
         const sheets = google.sheets({ version: 'v4', auth });
 
         // 1. Get the first row to determine the last column with data
         const firstRowResponse = await sheets.spreadsheets.values.get({
             spreadsheetId: process.env.GOOGLE_SHEET_ID,
-            range: `${sheetName}!1:1`, // Read only the first row
+            range: `${sheetName}!1:1`,
         });
 
         const firstRowValues = firstRowResponse.data.values || [];
-        const lastColumnIndex = firstRowValues[0]?.length || 1; // Get the number of columns in the first row
-
-        // Convert the column index to a letter (e.g., 26 becomes "Z", 27 becomes "AA")
+        const lastColumnIndex = firstRowValues[0]?.length || 1;
         const lastColumnLetter = columnToLetter(lastColumnIndex);
 
         // 2. Construct the dynamic range
@@ -68,28 +104,20 @@ const readGoogleSheet = async (sheetName) => {
 
 const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null) => {
     try {
-        const keyFilePath = process.env.KEY_FILE_PATH;
-        const auth = new google.auth.GoogleAuth({
-            keyFile: keyFilePath,
-            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
-
+        const auth = getGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
         const sheets = google.sheets({ version: 'v4', auth });
 
-        // 1.  Determine the last column with data (up to a reasonable limit)
-        const lastColumnLetter = 'AZ'; // Set a reasonable limit
+        const lastColumnLetter = 'AZ';
         const dynamicRange = `${sheetName}!A:${lastColumnLetter}`;
 
-        // Read the sheet to find the row with the matching name in column D (index 3)
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: process.env.GOOGLE_SHEET_ID,
             range: dynamicRange,
         });
 
         const values = response.data.values || [];
-        // Ensure name is defined before using it
         if (!name) {
-            throw new Error(`Name is undefined.  Check the incoming request data.`);
+            throw new Error(`Name is undefined. Check the incoming request data.`);
         }
         const rowIndex = values.findIndex(row => row[3] === name);
 
@@ -97,7 +125,6 @@ const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null)
             throw new Error(`Name "${name}" not found in column D of sheet "${sheetName}"`);
         }
 
-        // Get the existing value in the specified column
         const existingValue = values[rowIndex][column] || '';
 
         let newValue;
@@ -107,8 +134,7 @@ const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null)
             newValue = existingValue ? `${existingValue} | ${data}` : data;
         }
 
-        // Update the specified column of the found row
-        const columnLetterUpdate = columnToLetter(column + 1); // Use helper function here
+        const columnLetterUpdate = columnToLetter(column + 1);
         const rowNumber = rowIndex + 1;
         const updateRange = `${sheetName}!${columnLetterUpdate}${rowNumber}`;
 
@@ -127,9 +153,13 @@ const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null)
         return updateResponse.data;
     } catch (err) {
         console.error('Error updating Google Sheet:', err);
-        throw err; // Re-throw the error for the API endpoint to handle
+        throw err;
     }
 };
+
+app.get('/', (req, res) => {
+    res.send('Medical Back API is running!');
+});
 
 app.get('/api/medical-data', async (req, res) => {
     try {
@@ -140,30 +170,6 @@ app.get('/api/medical-data', async (req, res) => {
         res.status(500).json({ error: 'Failed to retrieve data from Google Sheet' });
     }
 });
-
-// New endpoint to fetch and filter data
-app.get('/api/health-summary', async (req, res) => {
-    const { search } = req.query;
-
-    try {
-        const data = await readGoogleSheet(medicalSheetName);
-        let filteredData = data;
-
-        if (search) {
-            filteredData = data.filter(item => {
-                const fullName = item[0] ? item[0].toLowerCase() : ''; // Check if item[0] exists
-                const searchTerm = String(search).toLowerCase();
-                return fullName.includes(searchTerm);
-            });
-        }
-
-        res.json(filteredData);
-    } catch (error) {
-        console.error('Error fetching health summary:', error);
-        res.status(500).json({ error: 'Failed to retrieve health summary' });
-    }
-});
-
 // New endpoint to fetch blood pressure data
 app.get('/api/blood-pressure-data', async (req, res) => {
     try {
@@ -176,48 +182,6 @@ app.get('/api/blood-pressure-data', async (req, res) => {
         res.status(500).json({ error: 'Failed to retrieve data from Google Sheet' });
     }
 });
-
-app.post('/api/login', async (req, res) => {
-    console.log('Login request body:', req.body);
-    const { churchID, username, password } = req.body;
-
-    try {
-        const users = await readGoogleSheet(usersSheetName);
-        // Find user by comparing username (case-insensitive and whitespace-trimmed)
-        const userRow = users.find(row => row[0]?.trim().toLowerCase() === username?.trim().toLowerCase());
-
-        if (!userRow) {
-            return res.status(401).json({ success: false, message: 'Invalid credentials' });
-        }
-
-        // Extract user data from the row
-        const userData = {
-            username: userRow[0],
-            passwordHash: userRow[1], // Assuming the hashed password is in the second column
-            church_id: userRow[2],
-        };
-
-        console.log('User data from Google Sheet:', userData);
-
-        // Compare the provided password with the stored hash
-        const passwordMatch = await bcrypt.compare(password, userData.passwordHash);
-
-        if (!passwordMatch) {
-            return res.status(401).json({ success: false, message: 'Invalid credentials' });
-        }
-
-        if (churchID !== userData.church_id) {
-            return res.status(401).json({ success: false, message: 'Invalid credentials' });
-        }
-
-        res.json({ success: true, message: 'Login successful!' });
-    } catch (error) {
-        console.error('Error during login:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
-    }
-});
-
-
 app.post('/api/register', async (req, res) => {
     const { churchID, username, password } = req.body;
 
@@ -405,7 +369,6 @@ app.post('/api/update-remarks', async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to update remarks', error: error.message });
     }
 });
-
 app.post('/api/update-message-text', async (req, res) => {
     const { name, messageTextData } = req.body;
     const messageTextColumn = 28; // Column AC
@@ -418,7 +381,6 @@ app.post('/api/update-message-text', async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to update message text', error: error.message });
     }
 });
-
 app.post('/api/update-date-time-to-remind', async (req, res) => {
       const { name, nzdtDateTime, dateTimeToRemindData } = req.body;
       const dateToRemindColumnAA = 26; // Column AA
@@ -445,7 +407,6 @@ app.post('/api/update-date-time-to-remind', async (req, res) => {
           res.status(500).json({ success: false, message: 'Failed to update date and time to remind', error: error.message });
       }
   });
-
 app.post('/api/update-time-to-remind', async (req, res) => {
     const { name, timeToRemindData } = req.body;
     const timeToRemindColumn = 27; // Column AB
@@ -461,17 +422,17 @@ app.post('/api/update-time-to-remind', async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to update time to remind', error: error.message });
     }
 });
-
 app.post('/api/add-medical-data', async (req, res) => {
     console.log('Add medical data request body:', req.body);
     const { surname, firstname, middle, address, contactNo, birthday, gender, status, visaStatus, localeGroup } = req.body;
 
     try {
-        const keyFilePath = process.env.KEY_FILE_PATH;
-        const auth = new google.auth.GoogleAuth({
-            keyFile: keyFilePath,
-            scopes: ['https://www.googleapis.com/auth/spreadsheets'], // Changed to write scope
-        });
+//        const keyFilePath = process.env.KEY_FILE_PATH;
+// const auth = new google.auth.GoogleAuth({
+//     keyFile: keyFilePath,
+//     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+// });
+const auth = getGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
 
         const sheets = google.sheets({ version: 'v4', auth });
         const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -549,11 +510,12 @@ app.post('/api/update-medical-data', async (req, res) => {
     }
 
     try {
-        const keyFilePath = process.env.KEY_FILE_PATH;
-        const auth = new google.auth.GoogleAuth({
-            keyFile: keyFilePath,
-            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
+        // const keyFilePath = process.env.KEY_FILE_PATH;
+        // const auth = new google.auth.GoogleAuth({
+        //     keyFile: keyFilePath,
+        //     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        // });
+        const auth = getGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
 
         const sheets = google.sheets({ version: 'v4', auth });
         const sheetName = medicalSheetName;
@@ -614,6 +576,98 @@ app.post('/api/search-medical-data', async (req, res) => {
     }
 });
 
-app.listen(port, () => {
-    console.log(`Server listening at http://localhost:${port}`);
+app.get('/api/health-summary', async (req, res) => {
+    const { search } = req.query;
+    try {
+        const data = await readGoogleSheet(medicalSheetName);
+        let filteredData = data;
+        if (search) {
+            filteredData = data.filter(item => {
+                const fullName = item[0] ? item[0].toLowerCase() : '';
+                const searchTerm = String(search).toLowerCase();
+                return fullName.includes(searchTerm);
+            });
+        }
+        res.json(filteredData);
+    } catch (error) {
+        console.error('Error fetching health summary:', error);
+        res.status(500).json({ error: 'Failed to retrieve health summary' });
+    }
+});
+
+app.get('/api/blood-pressure-data', async (req, res) => {
+    try {
+        console.log('readGoogleSheet function is running');
+        const data = await readGoogleSheet(bloodSheetName);
+        console.log('Data from readGoogleSheet:', data);
+        res.json(data);
+    } catch (error) {
+        console.error('Error in /api/blood-pressure-data:', error);
+        res.status(500).json({ error: 'Failed to retrieve data from Google Sheet' });
+    }
+});
+
+app.post('/api/login', async (req, res) => {
+    console.log('Login request body:', req.body);
+    const { churchID, username, password } = req.body;
+
+    try {
+        const users = await readGoogleSheet(usersSheetName);
+        console.log('Users from sheet:', users);
+
+        const userRow = users.find(row => row[0]?.trim().toLowerCase() === username?.trim().toLowerCase());
+        console.log('Matched userRow:', userRow);
+
+        if (!userRow) {
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+
+        const userData = {
+            username: userRow[0],
+            passwordHash: userRow[1],
+            church_id: userRow[2],
+        };
+        console.log('User data:', userData);
+
+        const passwordMatch = await bcrypt.compare(password, userData.passwordHash);
+        console.log('Password match:', passwordMatch);
+
+        if (!passwordMatch) {
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+
+        if (churchID !== userData.church_id) {
+            console.log('Church ID mismatch:', churchID, userData.church_id);
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+
+        res.json({ success: true, message: 'Login successful!' });
+    } catch (error) {
+        console.error('Error during login:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+app.post('/api/send-sms', async (req, res) => {
+  const { to, message, dateTime } = req.body;
+
+  if (!to || !message) {
+    return res.status(400).json({ error: 'Missing "to" or "message" in request body.' });
+  }
+
+  try {
+    // You can use dateTime for scheduling if you implement a scheduler (not included here)
+    const result = await client.messages.create({
+      body: `${message}\nScheduled for: ${dateTime}`,
+      from: twilioNumber,
+      to,
+    });
+    res.json({ success: true, sid: result.sid });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });
