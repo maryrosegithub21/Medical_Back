@@ -427,11 +427,7 @@ app.post('/api/add-medical-data', async (req, res) => {
     const { surname, firstname, middle, address, contactNo, birthday, gender, status, visaStatus, localeGroup } = req.body;
 
     try {
-//        const keyFilePath = process.env.KEY_FILE_PATH;
-// const auth = new google.auth.GoogleAuth({
-//     keyFile: keyFilePath,
-//     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-// });
+
 const auth = getGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
 
         const sheets = google.sheets({ version: 'v4', auth });
@@ -608,17 +604,26 @@ app.get('/api/blood-pressure-data', async (req, res) => {
 });
 
 app.post('/api/login', async (req, res) => {
-    console.log('Login request body:', req.body);
+    console.log('--- LOGIN DEBUG ---');
+    console.log('Request body:', req.body);
     const { churchID, username, password } = req.body;
 
     try {
         const users = await readGoogleSheet(usersSheetName);
         console.log('Users from sheet:', users);
 
+        // Log all usernames for comparison
+        const usernames = users.map(row => row[0]);
+        console.log('All usernames in sheet:', usernames);
+
+        // Log the username being searched for
+        console.log('Username to match:', username);
+
         const userRow = users.find(row => row[0]?.trim().toLowerCase() === username?.trim().toLowerCase());
         console.log('Matched userRow:', userRow);
 
         if (!userRow) {
+            console.log('No user found for username:', username);
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
 
@@ -629,18 +634,24 @@ app.post('/api/login', async (req, res) => {
         };
         console.log('User data:', userData);
 
+        // Log the password being compared
+        console.log('Password to compare:', password);
         const passwordMatch = await bcrypt.compare(password, userData.passwordHash);
         console.log('Password match:', passwordMatch);
 
         if (!passwordMatch) {
+            console.log('Password mismatch for user:', username);
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
 
+        // Log the churchID being compared
+        console.log('ChurchID to compare:', churchID, 'Expected:', userData.church_id);
         if (churchID !== userData.church_id) {
             console.log('Church ID mismatch:', churchID, userData.church_id);
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
 
+        console.log('Login successful for user:', username);
         res.json({ success: true, message: 'Login successful!' });
     } catch (error) {
         console.error('Error during login:', error);
