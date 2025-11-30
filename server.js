@@ -19,6 +19,8 @@ const client = twilio(accountSid, authToken);
 const usersSheetName = 'Users';
 const medicalSheetName = 'Medical';
 const bloodSheetName = 'Blood Pressure';
+// AUTOTEXTMESSAGES integration: add target sheet name
+const autoTextMessagesSheetName = 'AUTOTEXTMESSAGES';
 
 // Helper function to convert column index to letter
 function columnToLetter(column) {
@@ -51,7 +53,7 @@ function columnToLetter(column) {
  */
 function getGoogleAuth(scopes) {
     if (process.env.KEY_FILE_PATH) {
-        // Warn if KEY_FILE_PATH is set in production/Cloud Run
+        // Warn if KEY_FILE_PATH is set in a Cloud Run environment
         if (process.env.K_SERVICE || process.env.K_REVISION) {
             console.warn(
                 '[WARNING] KEY_FILE_PATH is set in a Cloud Run environment. This will cause errors. ' +
@@ -68,6 +70,7 @@ function getGoogleAuth(scopes) {
         scopes,
     });
 }
+
 const readGoogleSheet = async (sheetName) => {
     console.log('readGoogleSheet is running for sheet:', sheetName);
     try {
@@ -119,7 +122,7 @@ const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null)
         if (!name) {
             throw new Error(`Name is undefined. Check the incoming request data.`);
         }
-        const rowIndex = values.findIndex(row => row[3] === name);
+        const rowIndex = values.findIndex(row => (row[3] || '').trim() === (name || '').trim());
 
         if (rowIndex === -1) {
             throw new Error(`Name "${name}" not found in column D of sheet "${sheetName}"`);
@@ -127,11 +130,16 @@ const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null)
 
         const existingValue = values[rowIndex][column] || '';
 
-        let newValue;
-        if (dateTime) {
-            newValue = existingValue ? `${existingValue} | ${dateTime}` : dateTime;
-        } else {
-            newValue = existingValue ? `${existingValue} | ${data}` : data;
+        // Append a single-pipe-delimited, trimmed token if provided
+        let token = '';
+        if (dateTime != null && String(dateTime).trim() !== '') {
+            token = String(dateTime).trim();
+        } else if (data != null && String(data).trim() !== '') {
+            token = String(data).trim();
+        }
+        let newValue = existingValue;
+        if (token) {
+            newValue = existingValue ? `${existingValue} | ${token}` : token;
         }
 
         const columnLetterUpdate = columnToLetter(column + 1);
@@ -156,6 +164,73 @@ const updateGoogleSheet = async (sheetName, name, data, column, dateTime = null)
         throw err;
     }
 };
+
+// AUTOTEXTMESSAGES integration: helpers
+/**
+ * Extracts the last non-empty token from a pipe-delimited string.
+ * Example: "9/16/2025 12:16 PM | | 9/17/2025 12:22 PM |" -> "9/17/2025 12:22 PM"
+ */
+function extractLastDelimitedToken(input) {
+    if (input == null) return '';
+    return String(input)
+        .split('|')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .pop() || '';
+}
+
+/**
+ * Appends a mapped row to AUTOTEXTMESSAGES for the given person name (column D in Medical).
+ * Mapping:
+ *   Medical D  -> AUTOTEXTMESSAGES A
+ *   Medical AA (last pipe token) -> AUTOTEXTMESSAGES B
+ *   Medical L  -> AUTOTEXTMESSAGES C
+ *   Medical AC -> AUTOTEXTMESSAGES D
+ */
+async function appendAutotextMessageForName(name, lastAAToken) {
+    const auth = getGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
+    const sheets = google.sheets({ version: 'v4', auth });
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+    // Read current Medical data up to AC
+    const medicalRange = `${medicalSheetName}!A:AC`;
+    const resp = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: medicalRange,
+    });
+
+    const values = resp.data.values || [];
+    const rowIndex = values.findIndex(row => (row[3] || '').trim() === (name || '').trim()); // Column D (0-based index 3)
+    if (rowIndex === -1) {
+        throw new Error(`Name "${name}" not found in column D of sheet "${medicalSheetName}"`);
+    }
+
+    const row = values[rowIndex] || [];
+    const medicalD  = row[3]  || ''; // D
+    const medicalL  = row[11] || ''; // L
+    const medicalAA = row[26] || ''; // AA
+    const medicalAC = row[28] || ''; // AC
+
+    const lastAA = (lastAAToken && String(lastAAToken).trim()) || extractLastDelimitedToken(medicalAA);
+    console.log('[AUTOTEXT] computed lastAA token:', lastAA, 'from override?', Boolean(lastAAToken));
+    // If AA has no meaningful token, skip appending
+    if (!lastAA) {
+        console.log('[AUTOTEXT] No meaningful AA token to append for name:', name);
+        return;
+    }
+
+    console.log('[AUTOTEXT] appending row to AUTOTEXTMESSAGES:', { name: medicalD, lastAA, medicalL, medicalAC });
+    await sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: `${autoTextMessagesSheetName}!A1`,
+        valueInputOption: 'USER_ENTERED',
+        insertDataOption: 'INSERT_ROWS',
+        resource: {
+            values: [[medicalD, lastAA, medicalL, medicalAC]],
+        },
+    });
+    console.log('[AUTOTEXT] append success');
+}
 
 app.get('/', (req, res) => {
     res.send('Medical Back API is running!');
@@ -391,15 +466,21 @@ app.post('/api/update-date-time-to-remind', async (req, res) => {
               return res.status(400).json({ success: false, message: "Name is required in the request body" });
           }
 
-          // Format the delimited data
-          const delimitedAA = nzdtDateTime ? `${nzdtDateTime} | ` : '';
-          const delimitedAB = dateTimeToRemindData ? `${dateTimeToRemindData} | ` : '';
+          // Use tokens without trailing pipes; updater will add separators
+          const tokenAA = nzdtDateTime ? String(nzdtDateTime).trim() : '';
+          const tokenAB = dateTimeToRemindData ? String(dateTimeToRemindData).trim() : '';
 
           // Update column AA with NZDT time
-          await updateGoogleSheet(medicalSheetName, name, null, dateToRemindColumnAA, delimitedAA);
+          await updateGoogleSheet(medicalSheetName, name, null, dateToRemindColumnAA, tokenAA);
 
           // Update column AB with GMT time
-          await updateGoogleSheet(medicalSheetName, name, null, dateToRemindColumnAB, delimitedAB);
+          await updateGoogleSheet(medicalSheetName, name, null, dateToRemindColumnAB, tokenAB);
+
+          // Wait briefly to ensure updates are visible before reading back
+          await new Promise(resolve => setTimeout(resolve, 300));
+
+          // AUTOTEXTMESSAGES integration: append mapped row after AA/AB updates
+          await appendAutotextMessageForName(name, tokenAA);
 
           res.json({ success: true, message: 'Date and Time to Remind updated successfully' });
       } catch (error) {
